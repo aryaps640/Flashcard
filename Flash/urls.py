@@ -6,12 +6,11 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.urls import path, include
 from .views import (AllReviewFlashcardsView,MCQuestionViewSet,  MCQAnswerViewSet, QuestionsViewSet,AnswersViewSet, 
-FillQuestionViewSet, FillAnswerViewSet,CheckStatementViewSet, QuizViewSet, ResendOTPView, ReviewFlashcardsBySubfolderView, ReviewFlashcardsView,TrueFalseViewSet,FeedbackViewSet,mcq_crud,fib_crud,sub_crud,truefalse_crud,manage_tags, 
+FillQuestionViewSet, FillAnswerViewSet,CheckStatementViewSet, QuizViewSet, ReviewFlashcardsBySubfolderView, ReviewFlashcardsView,TrueFalseViewSet,FeedbackViewSet,mcq_crud,fib_crud,sub_crud,truefalse_crud,manage_tags, 
 QuestionFeedbackView,RegisterUserView, VerifyUserEmail,  TestingAuthenticatedReq,VerifyUserEmail, TestingAuthenticatedReq, PasswordResetConfirm, PasswordResetRequestView,
-SetNewPasswordView, LogoutApiView, weekly_summary, daily_summary, monthly_summary, get_user_sessions, LoginUserView)
-
-
-
+SetNewPasswordView, LogoutApiView, weekly_summary, daily_summary, monthly_summary, get_user_sessions, LoginUserView, ResendOTPView)
+from .views import GoogleLoginAPIView
+from .views import get_quiz_attempt_result
 
 router = DefaultRouter()
 router.register(r'mcq-quesans', views.MCQuestionViewSet, basename='MCQ Flashcard')
@@ -70,7 +69,7 @@ urlpatterns = [
     path('login/', LoginUserView.as_view(), name='login'),
     path('test/', TestingAuthenticatedReq.as_view(), name='test'),
     path('password-reset/', PasswordResetRequestView.as_view(), name='password-reset'),
-    path('password-reset-confirm/<uidb64>/<token>/', PasswordResetConfirm.as_view(), name='reset-password-confirm'),
+    path('password-reset-confirm/<str:uidb64>/<str:token>/', PasswordResetConfirm.as_view(), name='reset-password-confirm'),
     path('set-new-password/<uidb64>/<token>/', SetNewPasswordView.as_view(), name='set-new-password'),
     path('logout/', views.logout_user, name='logout'),
     path('weekly-summary/', weekly_summary, name='weekly-summary'),
@@ -87,11 +86,15 @@ urlpatterns = [
 
     path('quiz/<int:quiz_id>/submit/', views.submit_quiz_answers, name='submit-quiz-answers'),
     path('quiz/<int:quiz_id>/result/', views.get_quiz_result, name='quiz-result'),
+    path('quiz/<int:quiz_id>/attempt/<int:attempt_number>/', get_quiz_attempt_result, name='get_quiz_attempt_result'),
     path('api/day-summary/', views.day_summary, name='day_summary'),
     path('api/week-summary/', views.week_summary, name='week_summary'),
     path('api/month-summary/', views.month_summary, name='month_summary'),
     path('api/year-summary/', views.year_summary, name='year_summary'),
-
     path('resend-otp/', ResendOTPView.as_view(), name='resend-otp'),
+
+    path('auth/google/', GoogleLoginAPIView.as_view(), name='google_login'),
+
+
 
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

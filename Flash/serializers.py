@@ -1,15 +1,15 @@
 from rest_framework import serializers
 from .models import MCQuestion, MCQAnswer, Question, Answer, FillQuestions, FillAnswers, CheckStatement, Quiz, ReviewSchedule, TrueFalse, Folder, UploadedImage, File, Feedback,Tag, User, UserSession, InvalidToken
 from random import shuffle
-import random
 from django.contrib.auth import authenticate
 from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils.encoding import smart_str, force_str, smart_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.contrib.sites.shortcuts import get_current_site
+from django.conf import settings
 from django.urls import reverse
-from .utils import send_normal_email, send_code_to_user
+from .utils import send_normal_email
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.utils import timezone
 from django.db.models import F
@@ -22,7 +22,6 @@ class TagSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tag
         fields = ['id', 'name']
-
 
 class MCQAnswerSerializer(serializers.ModelSerializer):
     # question_id = serializers.PrimaryKeyRelatedField(queryset=MCQuestion.objects.all(), source='question', write_only=True)
@@ -588,75 +587,29 @@ class UploadedImageSerializer(serializers.ModelSerializer):
         fields = ['_id', 'statement', 'created_date', 'created_by', 'question_type', 'explanation', 'answers', 'subfolder_id', 'tags']
         read_only_fields = ['created_date', 'created_by']
 
+class UserRegisterSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(max_length=68, min_length=6, write_only=True)
+    password2 = serializers.CharField(max_length=68, min_length=6, write_only=True)
 
-
-from rest_framework import serializers
-from django.utils.timezone import now, timedelta
-from .models import User, OneTimePassword
-
-
-
-
-class RegisterUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password')
-        extra_kwargs = {'password': {'write_only': True}}
+        fields = ['email', 'first_name', 'last_name', 'password', 'password2']
+
+    def validate(self, attrs):
+        if attrs['password'] != attrs['password2']:
+            raise serializers.ValidationError("Passwords do not match.")
+        return attrs
 
     def create(self, validated_data):
-        user = User.objects.create_user(**validated_data)
-        user.is_verified = False  # Set user as unverified initially
-        user.save()
-
-        # Generate OTP
-        otp = str(random.randint(100000, 999999))
-        OneTimePassword.objects.create(
-            user=user, 
-            code=otp, 
-            expires_at=now() + timedelta(minutes=5)
+        user = User.objects.create_user(
+            email=validated_data['email'],
+            first_name=validated_data['first_name'],
+            last_name=validated_data['last_name'],
+            password=validated_data['password'],
         )
-        
-        # Send OTP
-        send_code_to_user(user.email, otp)
-
+        # MongoDB automatically generates the _id here
         return user
-
     
-class VerifyUserEmailSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    otp = serializers.CharField(max_length=6)
-
-    def validate(self, data):
-        email = data.get("email")
-        otp = data.get("otp")
-
-        try:
-            user = User.objects.get(email=email)
-            otp_record = OneTimePassword.objects.filter(user=user, code=otp).first()
-
-            if not otp_record:
-                raise serializers.ValidationError("Invalid OTP.")
-
-            if otp_record.is_expired():
-                raise serializers.ValidationError("OTP has expired. Please request a new one.")
-
-            user.is_verified = True
-            user.save()
-            otp_record.delete()  # Remove OTP after successful verification
-
-        except User.DoesNotExist:
-            raise serializers.ValidationError("User with this email does not exist.")
-
-        return data
-
-
-class ResendOTPSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-
-    def validate_email(self, value):
-        if not User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("User with this email does not exist.")
-        return value
 
 
 class LoginSerializer(serializers.ModelSerializer, SessionTrackingMixin):
@@ -760,26 +713,36 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         email = attrs.get('email')
-        if User.objects.filter(email=email).exists():
+        try:
             user = User.objects.get(email=email)
-            uidb64 = urlsafe_base64_encode(smart_bytes(user.id))
-            token = PasswordResetTokenGenerator().make_token(user)
-            request = self.context.get('request')
-            current_site = get_current_site(request).domain
             
-            # Modify this link to point to your frontend or the password reset page
-            relative_link = reverse('set-new-password', kwargs={'uidb64': uidb64, 'token': token})
-            abslink = f"http://{current_site}{relative_link}"
+            uidb64 = urlsafe_base64_encode(smart_bytes(user._id))
+            token = PasswordResetTokenGenerator().make_token(user)
+            reset_link = f"{settings.FRONTEND_URL}/password-reset-confirm/{uidb64}/{token}/"
 
-            email_body = f"Hi {user.first_name}, use the link below to reset your password:\n{abslink}"
-            data = {
-                'email_body': email_body, 
-                'email_subject': "Reset your Password", 
-                'to_email': user.email
-            }
-            send_normal_email(data)
+            # Customize the email format here
+            email_subject = "Reset Your Password"
+            email_body = f"""
+            Hi {user.first_name},
 
-        return super().validate(attrs)
+            We received a request to reset your password. Click the link below to reset it:
+
+            {reset_link}
+
+            If you did not request a password reset, please ignore this email.
+
+            Thanks,
+            The Flashcard Team
+            """
+            send_normal_email({
+                'email_subject': email_subject,
+                'email_body': email_body,
+                'to_email': email
+            })
+            
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User with this email does not exist.")
+        return attrs
 
 class SetNewPasswordSerializer(serializers.Serializer):
     password = serializers.CharField(max_length=100, min_length=6, write_only=True)
@@ -868,6 +831,7 @@ class VerifyUserEmailSerializer(serializers.Serializer):
 
 # from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+
 # class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 #     @classmethod
 #     def get_token(cls, user):
@@ -882,9 +846,15 @@ class VerifyUserEmailSerializer(serializers.Serializer):
 class QuizSerializer(serializers.ModelSerializer):
     class Meta:
         model = Quiz
-        fields = ['id', 'created_by', 'folder', 'total_questions', 'attempted_questions', 'correct_answers', 'started_at', 'ended_at',]
+        fields = ['id', 'created_by', 'folder', 'total_questions', 'attempted_questions', 'correct_answers', 'started_at', 'ended_at', 'passing_percentage', 'max_attempts']
 
 
+from rest_framework import serializers
+from .models import QuizAttempt
 
+class QuizAttemptSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuizAttempt
+        fields = '__all__'
 
 

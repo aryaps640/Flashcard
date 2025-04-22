@@ -5,8 +5,8 @@ from rest_framework import generics
 from rest_framework.generics import GenericAPIView 
 from rest_framework.permissions import AllowAny, AllowAny
 from .models import OneTimePassword, Quiz, ReviewSchedule
-from .serializers import PasswordResetRequestSerializer,LogoutUserSerializer, QuizSerializer, ResendOTPSerializer, ReviewScheduleSerializer, LoginSerializer, SetNewPasswordSerializer, VerifyUserEmailSerializer, RegisterUserSerializer
-from .utils import generate_otp, send_code_to_user
+from .serializers import PasswordResetRequestSerializer,LogoutUserSerializer, QuizSerializer, ReviewScheduleSerializer,  UserRegisterSerializer, LoginSerializer, SetNewPasswordSerializer, VerifyUserEmailSerializer
+from .utils import send_code_to_user
 from django.utils.http import urlsafe_base64_decode
 from django.utils.encoding import smart_str, DjangoUnicodeDecodeError
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
@@ -42,8 +42,74 @@ from rest_framework.decorators import api_view, permission_classes, authenticati
 from rest_framework.permissions import IsAuthenticated
 import logging
 
-
 from rest_framework_simplejwt.authentication import JWTAuthentication
+
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+from django.conf import settings
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.contrib.auth.models import User
+from rest_framework_simplejwt.tokens import RefreshToken
+
+class GoogleLoginAPIView(APIView):
+    def post(self, request):
+        id_token_from_frontend = request.data.get("id_token")
+        client_id = request.data.get("client_id")
+        client_secret = request.data.get("client_secret")  # Optional, if needed for additional validation
+
+        if not id_token_from_frontend or not client_id:
+            return Response({"error": "Both id_token and client_id are required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Verify the token dynamically using client_id from the request
+            idinfo = id_token.verify_oauth2_token(
+                id_token_from_frontend,
+                google_requests.Request(),
+                client_id
+            )
+
+            email = idinfo.get("email")
+            first_name = idinfo.get("given_name", "")
+            last_name = idinfo.get("family_name", "")
+
+            # Create or get the user
+            user, created = User.objects.get_or_create(email=email, defaults={
+                "username": email,
+                "first_name": first_name,
+                "last_name": last_name,
+                "is_verified": True,  # Mark email as verified
+            })
+
+            # Generate tokens
+            refresh = RefreshToken.for_user(user)
+
+            return Response({
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+                "user": {
+                    "username": user.username,
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                }
+            })
+
+        except ValueError as e:
+            return Response({"error": "Invalid ID token", "detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+
+
+
+
+
+
+
 
 def home(request):
     return render(request, 'home.html')
@@ -1333,7 +1399,7 @@ def feedback_detail(request, feedback_id):
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from .models import MCQuestion, FillQuestions, Question, CheckStatement, Tag
+from .models import MCQuestion, FillQuestions, Question, CheckStatement, Tag, QuizAttempt
 from .serializers import MCQuestionSerializer, FillQuestionsSerializer, QuestionSerializer, CheckStatementSerializer, TagSerializer
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
@@ -1635,49 +1701,48 @@ def manage_uploaded_images(request, subfolder_id, question_id=None):
             return Response({"error": "UploadedImage not found."}, status=status.HTTP_404_NOT_FOUND)
         
 from bson import ObjectId
+class RegisterUserView(GenericAPIView):
+    serializer_class = UserRegisterSerializer
+    permission_classes = [AllowAny]
 
-class RegisterUserView(APIView):
-    permission_classes = [AllowAny]  # Allow anyone to register
     def post(self, request):
-        serializer = RegisterUserSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(
-                {"message": "User registered successfully. OTP has been sent to your email."}, 
-                status=status.HTTP_201_CREATED
-            )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        user_data = serializer.data
+        send_code_to_user(user_data['email'])
+        return Response({
+            'data': user_data,
+            'message': 'Thanks for signing up, a passcode has been sent to verify your email.'
+        }, status=status.HTTP_201_CREATED)
 
 
-class VerifyUserEmail(APIView):
+from datetime import timedelta
+from django.utils.timezone import now
+
+class VerifyUserEmail(GenericAPIView):
+    serializer_class = VerifyUserEmailSerializer
+    permission_classes = [AllowAny]
+
     def post(self, request):
-        serializer = VerifyUserEmailSerializer(data=request.data)
-        if serializer.is_valid():
-            return Response({"message": "Email verified successfully."}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            passcode = request.data.get('otp')
+            user_pass_obj = OneTimePassword.objects.get(code=passcode)
 
+            # Check if the OTP is expired
+            if now() > user_pass_obj.created_at + timedelta(minutes=1):
+                return Response({'message': 'OTP has expired'}, status=status.HTTP_400_BAD_REQUEST)
 
-class ResendOTPView(APIView):
-    def post(self, request):
-        serializer = ResendOTPSerializer(data=request.data)
-        
-        if serializer.is_valid():
-            email = serializer.validated_data["email"]
-            user = User.objects.get(email=email)
+            user = user_pass_obj.user
+            user.is_verified = True
+            user.save()
 
-            # Generate and save new OTP
-            otp = generate_otp()
-            otp_record, created = OneTimePassword.objects.update_or_create(
-                user=user,
-                defaults={"code": otp, "expires_at": now() + timedelta(minutes=5)}
-            )
+            return Response({
+                'message': 'Account email verified successfully'
+            }, status=status.HTTP_200_OK)
+        except OneTimePassword.DoesNotExist:
+            return Response({'message': 'Invalid passcode'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Send OTP via email
-            send_code_to_user(email, otp)
-
-            return Response({"message": "OTP has been resent successfully"}, status=status.HTTP_200_OK)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class LoginUserView(GenericAPIView):
     serializer_class = LoginSerializer
     permission_classes = [AllowAny]
@@ -1763,7 +1828,8 @@ def login_user(request):
 
 
 class PasswordResetRequestView(GenericAPIView):
-    serializer_class=PasswordResetRequestSerializer
+    serializer_class = PasswordResetRequestSerializer
+    permission_classes = [AllowAny]  # Allow unauthenticated access
 
     def post(self, request):
         serializer=self.serializer_class(data=request.data, context={'request':request})
@@ -1774,54 +1840,74 @@ class PasswordResetRequestView(GenericAPIView):
 from django.contrib.auth import get_user_model
 User = get_user_model()
 
+from bson import ObjectId  # Import ObjectId for MongoDB compatibility
+
 class PasswordResetConfirm(GenericAPIView):
+    permission_classes = [AllowAny]  # Allow unauthenticated access
+
     def get(self, request, uidb64, token):
         try:
-            # Decode uidb64 to get the user_id
+            # Decode the UID
             user_id = smart_str(urlsafe_base64_decode(uidb64))
+            logger.debug(f"Decoded user ID: {user_id}")  # Log the decoded user ID
 
-            # Convert user_id to ObjectId before querying
-            user = User.objects.get(id=ObjectId(user_id))
+            # Convert user_id to ObjectId for MongoDB query
+            user = User.objects.get(_id=ObjectId(user_id))
 
+            # Validate the token
             if not PasswordResetTokenGenerator().check_token(user, token):
-                return Response({'message': 'Token is invalid or has expired'}, status=status.HTTP_401_UNAUTHORIZED)
+                return Response({'message': 'Invalid or expired token'}, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response({'success': True, 'message': 'Credentials are valid', 'uidb64': uidb64, 'token': token}, status=status.HTTP_200_OK)
+            # If valid, return success response
+            return Response({
+                'success': True,
+                'message': 'Token is valid. You can now reset your password.',
+                'uidb64': uidb64,
+                'token': token
+            }, status=status.HTTP_200_OK)
 
+        except (ValueError, TypeError, DjangoUnicodeDecodeError):
+            # Handle decoding errors
+            logger.error(f"Invalid UID format: {uidb64}")
+            return Response({'message': 'Invalid UID format'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
-            return Response({'message': 'User does not exist'}, status=status.HTTP_404_NOT_FOUND)
-
-        except DjangoUnicodeDecodeError:
-            return Response({'message': 'Token is invalid or has expired'}, status=status.HTTP_401_UNAUTHORIZED)
-
+            # Handle missing user
+            logger.error(f"User does not exist for UID: {uidb64} (Decoded ID: {user_id})")
+            return Response({'message': 'User does not exist for the provided UID'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            # Handle unexpected errors
+            logger.error(f"Unexpected error: {str(e)}")
+            return Response({'message': 'An unexpected error occurred'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class SetNewPasswordView(GenericAPIView):
     serializer_class = SetNewPasswordSerializer
+    permission_classes = [AllowAny]  # Allow unauthenticated access
 
     def post(self, request, uidb64, token):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         try:
-            # Decode the uidb64 to get the user_id
+            # Decode the UID and fetch the user
             user_id = smart_str(urlsafe_base64_decode(uidb64))
-            user = User.objects.get(id=ObjectId(user_id))
+            user = User.objects.get(_id=ObjectId(user_id))
 
-            # Check the token validity
+            # Validate the token
             if not PasswordResetTokenGenerator().check_token(user, token):
-                return Response({'message': 'Token is invalid or has expired'}, status=status.HTTP_401_UNAUTHORIZED)
+                return Response({'message': 'Invalid or expired token'}, status=status.HTTP_400_BAD_REQUEST)
 
             # Set the new password
             user.set_password(serializer.validated_data['password'])
             user.save()
 
-            return Response({'success': True, 'message': "Password reset is successful"}, status=status.HTTP_200_OK)
+            return Response({'message': 'Password reset successful'}, status=status.HTTP_200_OK)
 
+        except (ValueError, TypeError, DjangoUnicodeDecodeError):
+            return Response({'message': 'Invalid UID format'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
             return Response({'message': 'User does not exist'}, status=status.HTTP_404_NOT_FOUND)
-
-        except DjangoUnicodeDecodeError:
-            return Response({'message': 'Token is invalid or has expired'}, status=status.HTTP_401_UNAUTHORIZED)
+        except Exception as e:
+            return Response({'message': f'An unexpected error occurred: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class TestingAuthenticatedReq(GenericAPIView):
@@ -2058,6 +2144,7 @@ def daily_summary(request):
         # Calculate today's date range
         end_date = timezone.now()
         start_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+
 
         # Get all flashcard IDs created by the user
         mcq_ids = list(MCQuestion.objects.filter(created_by=user_id).values_list('id', flat=True))
@@ -2548,7 +2635,15 @@ class QuizViewSet(viewsets.ModelViewSet):
         folder_id = self.request.data.get('folder')
         folder = Folder.objects.get(id=folder_id)
         total_questions = folder.mc_questions.count() + folder.fill_questions.count() + folder.check_statements.count() + folder.questions.count()
-        serializer.save(created_by=self.request.user._id, total_questions=total_questions)
+        
+        # Get the passing percentage from payload or use 35.0
+        passing_percentage = self.request.data.get('passing_percentage', 35.0)
+        max_attempts = self.request.data.get('max_attempts', None)
+        quiz = serializer.save(created_by=self.request.user._id, total_questions=total_questions, 
+                               passing_percentage=passing_percentage, max_attempts=max_attempts)
+
+        # Add payload response with quiz ID
+        self.request.data['quiz_id'] = quiz.id
 
 @api_view(['GET'])
 @authentication_classes([CustomJWTAuthentication])
@@ -2657,22 +2752,66 @@ def submit_quiz_answers(request, quiz_id):
                 if correct_sub_answers.filter(answer_text__iexact=selected_answer).exists():
                     correct_answers += 1
 
-            
+    previous_attempts = QuizAttempt.objects.filter(quiz=quiz, user=request.user).count()
 
-    # **Save the Quiz Results**
+    if quiz.max_attempts is not None and previous_attempts >= quiz.max_attempts:
+        return Response({"error": "Maximum number of attempts reached."}, status=403)
+
+    attempt_number = previous_attempts + 1        
+
+    
     try:
-        if quiz:
-            quiz.correct_answers = correct_answers
-            quiz.attempted_questions = len(answers)
-            quiz.ended_at = timezone.now()
-            quiz.save()
-        else:
-            return Response({"error": "Quiz object is not valid."}, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        print(f"Error saving quiz results: {str(e)}")
-        return Response({"error": f"Error saving quiz results: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        attempted_questions = len(answers)
+        wrong_answers = attempted_questions - correct_answers
+        final_score = correct_answers - wrong_answers
+        total_questions = quiz.total_questions
+        score_percentage = (final_score / total_questions) * 100 if total_questions else 0
+        passing_percentage = quiz.passing_percentage or 35.0
+        result = "Pass" if score_percentage >= passing_percentage else "Fail"
+        quiz_status = "Completed" if attempted_questions == total_questions else "In Progress"
 
-    return Response({"score": correct_answers, "attempted_questions": quiz.attempted_questions, "total_questions": quiz.total_questions }, status=200)
+        quiz_attempt = QuizAttempt.objects.create(
+            quiz=quiz,
+            user=request.user,
+            attempted_questions=attempted_questions,
+            total_questions=total_questions,
+            correct_answers=correct_answers,
+            wrong_answers=wrong_answers,
+            final_score=final_score,
+            score_percentage=score_percentage,
+            passing_percentage=passing_percentage,
+            result=result,
+            quiz_status=quiz_status,
+            started_at=quiz.started_at or timezone.now(),
+            ended_at=timezone.now()
+        )
+
+    except Exception as e:
+        print(f"Error saving quiz attempt: {str(e)}")
+        return Response({"error": f"Error saving quiz attempt: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    
+   
+
+    return Response({
+        "quiz_Id": quiz.id,
+        "quiz_attempt_id": str(quiz_attempt.id),
+        "attempt_number": attempt_number,  # Include attempt number
+        "max_attempts": quiz.max_attempts,  # Include max attempts
+        "attempted_questions": quiz_attempt.attempted_questions,
+        "total_questions": quiz_attempt.total_questions,
+        "correct_answers": quiz_attempt.correct_answers,
+        "wrong_answers": quiz_attempt.wrong_answers,
+        "Final Score": quiz_attempt.final_score,
+        "score_percentage": round(quiz_attempt.score_percentage, 2),
+        "passing_percentage": quiz_attempt.passing_percentage,
+        "result": quiz_attempt.result,
+        "quiz_status": quiz_attempt.quiz_status,
+        "started_at": quiz_attempt.started_at,
+        "ended_at": quiz_attempt.ended_at,
+        "folder": quiz.folder.id if quiz.folder else None,
+        "user_id": str(quiz_attempt.user._id)
+    }, status=200)
 
 
 
@@ -2688,33 +2827,103 @@ def get_quiz_result(request, quiz_id):
     
     try:
         # Ensure the quiz belongs to the user
+        #quiz = Quiz.objects.get(id=quiz_id, created_by=user_id)
         quiz = Quiz.objects.get(id=quiz_id, created_by=user_id)
+        quiz_attempts = QuizAttempt.objects.filter(quiz=quiz, user=request.user).order_by('ended_at')
+
+        if not quiz_attempts:
+            return Response({"error": "No attempt found for this quiz."}, status=404)
+
     except Quiz.DoesNotExist:
         return Response({"error": "Quiz not found or unauthorized access."}, status=status.HTTP_404_NOT_FOUND)
 
-    # Calculate the score percentage
-    total_questions = quiz.total_questions
-    attempted_questions = quiz.attempted_questions
-    correct_answers = quiz.correct_answers
-    score_percentage = (correct_answers / total_questions) * 100 if total_questions else 0
 
-    # Determine quiz status
-    quiz_status = "Completed" if quiz.ended_at else "In Progress"
+    
+
+    # Prepare the result data for all attempts
+    attempts_data = []
+    for attempt_number, quiz_attempt in enumerate(quiz_attempts, start=1):
+        attempts_data.append({
+            "attempt_number": attempt_number,
+            "quiz_attempt_id": str(quiz_attempt.id),
+            "max_attempts": quiz.max_attempts,
+            "attempted_questions": quiz_attempt.attempted_questions,
+            "total_questions": quiz_attempt.total_questions,
+            "correct_answers": quiz_attempt.correct_answers,
+            "wrong_answers": quiz_attempt.wrong_answers,
+            "final_score": quiz_attempt.final_score,
+            "score_percentage": round(quiz_attempt.score_percentage, 2),
+            "passing_percentage": quiz_attempt.passing_percentage,
+            "result": quiz_attempt.result,
+            "quiz_status": quiz_attempt.quiz_status,
+            "started_at": quiz_attempt.started_at,
+            "ended_at": quiz_attempt.ended_at
+        })
 
     # Return the result data
     result_data = {
-        "quiz_id": quiz.id,
-        "folder": quiz.folder.id if quiz.folder else None,
-        "total_questions": total_questions,
-        "attempted_questions": attempted_questions,
-        "score": correct_answers,
-        "score_percentage": round(score_percentage, 2),
-        "quiz_status": quiz_status,
-        "started_at": quiz.started_at if quiz.started_at else None,
-        "ended_at": quiz.ended_at if quiz.ended_at else "Not yet finished"
+        "quiz_Id": str(quiz.id),
+        "folder_Id": str(quiz.folder.id) if quiz.folder else None,
+        "user_id": str(request.user._id),
+        "total_attempts": len(attempts_data),
+        "max_attempts": quiz.max_attempts,  # Include max attempts
+        "attempts": attempts_data
     }
 
     return Response(result_data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@authentication_classes([CustomJWTAuthentication])
+@permission_classes([IsAuthenticated])
+def get_quiz_attempt_result(request, quiz_id, attempt_number):
+    """
+    Retrieve the result of a specific attempt for a quiz by attempt number.
+    """
+    user_id = request.user._id  # Get the authenticated user ID
+
+    try:
+        # Ensure the quiz belongs to the user
+        quiz = Quiz.objects.get(id=quiz_id, created_by=user_id)
+        quiz_attempts = QuizAttempt.objects.filter(quiz=quiz, user=request.user).order_by('ended_at')
+
+        if not quiz_attempts.exists():
+            return Response({"error": "No attempts found for this quiz."}, status=404)
+
+        # Get the specific attempt by attempt number
+        if attempt_number < 1 or attempt_number > quiz_attempts.count():
+            return Response({"error": "Invalid attempt number."}, status=400)
+
+        quiz_attempt = quiz_attempts[attempt_number - 1]  # Convert attempt_number to zero-based index
+
+    except Quiz.DoesNotExist:
+        return Response({"error": "Quiz not found or unauthorized access."}, status=status.HTTP_404_NOT_FOUND)
+
+    # Prepare the result data for the specific attempt
+    result_data = {
+        "quiz_Id": str(quiz.id),
+        "quiz_attempt_id": str(quiz_attempt.id),
+        "attempt_number": attempt_number,
+        "max_attempts": quiz.max_attempts,
+        "attempted_questions": quiz_attempt.attempted_questions,
+        "total_questions": quiz_attempt.total_questions,
+        "correct_answers": quiz_attempt.correct_answers,
+        "wrong_answers": quiz_attempt.wrong_answers,
+        "final_score": quiz_attempt.final_score,
+        "score_percentage": round(quiz_attempt.score_percentage, 2),
+        "passing_percentage": quiz_attempt.passing_percentage,
+        "result": quiz_attempt.result,
+        "quiz_status": quiz_attempt.quiz_status,
+        "started_at": quiz_attempt.started_at,
+        "ended_at": quiz_attempt.ended_at
+    }
+
+    return Response(result_data, status=status.HTTP_200_OK)
+
+
+
+
+
 
 
 
@@ -2862,6 +3071,25 @@ def year_summary(request):
         'year_end': end_of_year.strftime('%Y-%m-%d'),
         'monthly_hours_spent': [{'month': month, 'hours_spent': format_time_spent(hours)} for month, hours in monthly_reviews.items()]
     })
+
+from rest_framework.exceptions import ValidationError
+
+class ResendOTPView(GenericAPIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = request.data.get('email')
+        if not email:
+            return Response({'message': 'Email is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = User.objects.get(email=email)
+            send_code_to_user(email)  # This will raise an error if the user must wait
+            return Response({'message': 'A new OTP has been sent to your email, valid for 1 minute.'}, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response({'message': str(e)}, status=status.HTTP_429_TOO_MANY_REQUESTS)  # 429 Too Many Requests
+        except User.DoesNotExist:
+            return Response({'message': 'User with this email does not exist'}, status=status.HTTP_404_NOT_FOUND)
 
 
 

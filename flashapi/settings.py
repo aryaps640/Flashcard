@@ -13,12 +13,10 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 from djongo import models
 from datetime import timedelta
 
-
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
@@ -325,9 +323,16 @@ SIMPLE_JWT = {
 # EMAIL_HOST_PASSWORD = 'baeohcmuvqglgtaz'  # Consider using an app password or environment variable
 # DEFAULT_FROM_EMAIL = 'saharific@gmail.com'
 
+
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'aadil.warals@gmail.com'
 EMAIL_HOST_PASSWORD = 'gnktzvmnnibgymho'  # Consider using an app password or environment variable
 DEFAULT_FROM_EMAIL = 'aadil.warals@gmail.com'
+
+# Add the FRONTEND_URL setting
+FRONTEND_URL = 'http://flashcard.warals.codetorise.com'
+#FRONTEND_URL = 'http://localhost:3000'  # Replace with your frontend URL
+
+# https://flashcard.warals.codetorise.com/password-reset-confirm/Njc4NzUwMjc3N2VmYTc1ZmMzYWUyMWUw/cnooa5-38499cc3129ce49209717d7bf554a575/

@@ -11,6 +11,7 @@ from datetime import timedelta
 from django.core.exceptions import ValidationError
 from django.db import models
 
+
 class Tag(models.Model):
     name = models.CharField(max_length=50)
 
@@ -23,7 +24,6 @@ class Folder(models.Model):
     parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.CASCADE, related_name='subfolders')
     type = models.CharField(max_length=50, default='folder')
     created_by = models.CharField(max_length= 50, blank= True)
-
 
     def __str__(self):
         return self.name
@@ -463,7 +463,6 @@ class UserSession(models.Model):
 from bson import ObjectId
 from djongo import models
 from .fields import CustomObjectIdField
-import random
     
 class User(AbstractBaseUser, PermissionsMixin):
     _id = models.ObjectIdField(primary_key=True, editable=False)  # MongoDB's _id field
@@ -532,18 +531,34 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 
 class OneTimePassword(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    code = models.CharField(max_length=6)
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField()
+    user = models.OneToOneField(User, on_delete=models.CASCADE, db_index=True)  # Add db_index=True
+    code = models.CharField(max_length=6, unique=True, default="")
+    created_at = models.DateTimeField(auto_now=True)  # Track OTP creation timet to preserve the original timestamp
+    last_sent_at = models.DateTimeField(null=True, blank=True)  # Track the last OTP sent time
+
+    def __str__(self):
+        return f"{self.user.first_name} - passcode"
+
+# class UserSession(models.Model):
+#     user_id = models.CharField(max_length=255)
+#     login_time = models.DateTimeField()
+#     logout_time = models.DateTimeField(null=True, blank=True)
+#     duration = models.DurationField(null=True, blank=True)
+#     session_status = models.CharField(max_length=20, default='active')
     
-    def is_expired(self):
-        from django.utils.timezone import now
-        return now() > self.expires_at
-
+#     class Meta:
+#         db_table = 'user_sessions'
     
+#     def calculate_duration(self):
+#         if self.logout_time and self.login_time:
+#             self.duration = self.logout_time - self.login_time
+#             self.save(update_fields=['duration'])
+#         return self.duration
 
-
+#     def __str__(self):
+#         status = "Active" if self.session_status == 'active' else "Ended"
+#         duration = str(self.duration) if self.duration else "ongoing"
+#         return f"Session for {self.user_id} - {status} ({duration})"
 
 
 class InvalidToken(models.Model):
@@ -567,10 +582,33 @@ class Quiz(models.Model):
     correct_answers = models.IntegerField(default=0)
     started_at = models.DateTimeField(auto_now_add=True)
     ended_at = models.DateTimeField(null=True, blank=True)
-    
+    passing_percentage = models.FloatField(default=35.0)
+    max_attempts = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
         return f"Quiz {self.id} by {self.created_by}"
+
+
+from django.db import models
+from django.utils import timezone
+
+class QuizAttempt(models.Model):
+    quiz = models.ForeignKey('Quiz', on_delete=models.CASCADE, related_name='attempts')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)  # Use AUTH_USER_MODEL
+    attempted_questions = models.IntegerField()
+    total_questions = models.IntegerField()
+    correct_answers = models.IntegerField()
+    wrong_answers = models.IntegerField()
+    final_score = models.FloatField()
+    score_percentage = models.FloatField()
+    passing_percentage = models.FloatField()
+    result = models.CharField(max_length=10)  # e.g., "Pass" or "Fail"
+    quiz_status = models.CharField(max_length=20)  # e.g., "Completed" or "In Progress"
+    started_at = models.DateTimeField(default=timezone.now)
+    ended_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"{self.user} - {self.quiz} - Attempt {self.attempt_number}"
 
 
 #Time_Spent
